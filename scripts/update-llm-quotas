@@ -1,43 +1,210 @@
 #!/usr/bin/env bash
 # omarchy:summary=Refresh LLM provider quota records for the agents panel
-# omarchy:args=[--force]
-# omarchy:examples=update-llm-quotas | update-llm-quotas --force
+# omarchy:args=[--force] [--resolve <provider>]
+# omarchy:examples=update-llm-quotas | update-llm-quotas --force | update-llm-quotas --resolve opencode-go
 
 # Writes one agent usage record per authenticated provider into
 # ~/.local/state/omarchy/agents/usage/, the directory the agents panel
-# watches. Providers without stored credentials are skipped silently; a
+# watches. Providers without resolvable credentials are skipped silently; a
 # failed fetch leaves that provider's previous record untouched.
 #
 #   opencode-go  GET opencode.ai/zen/go/v1/usage          (rolling/weekly/monthly)
 #   openrouter   GET openrouter.ai/api/v1/key + /credits  (cap, balance)
 #   openai       GET api.openai.com dashboard billing     (monthly vs hard limit)
 #
-# Keys resolve from the environment first (OPENCODE_GO_API_KEY,
-# OPENROUTER_API_KEY, OPENAI_API_KEY — e.g. exported from
-# ~/.config/uwsm/env.d/*.sh), else from the matching entry of
-# ~/.local/share/opencode/auth.json that `/connect` maintains.
+# Credential resolution per provider, first hit wins:
+#
+#   1. Session environment variables (see env_var_names for the aliases)
+#   2. The system's default AI agent (omarchy-default-agent), searched in its
+#      own configuration files by a dedicated adapter — the plugin never
+#      depends on one harness being installed
+#   3. ~/.config/omarchy/api-keys.env manual override file (KEY=value lines,
+#      parsed literally, never sourced)
+#
+# Agent config files are only ever read, never written.
 
 set -euo pipefail
 
-AUTH="$HOME/.local/share/opencode/auth.json"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy"
 MAX_AGE=240
 
 force=false
-[[ ${1:-} == "--force" ]] && force=true
 mkdir -p "$CACHE_DIR" "$STATE_DIR"
 
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-resolve_key() {
-  local env_name=$1 auth_entry=$2
-  local key=${!env_name:-}
-  if [[ -z $key && -n $auth_entry ]]; then
-    key=$(jq -r --arg e "$auth_entry" '.[$e].key // empty' "$AUTH" 2>/dev/null || true)
-  fi
-  printf '%s' "$key"
+usage() {
+  cat <<USAGE
+Usage: update-llm-quotas [--force] [--resolve <provider>]
+
+  --force              Bypass the per-API response cache
+  --resolve <provider> Print the credential resolved for a provider
+                       (opencode-go, openrouter, openai) and exit
+USAGE
 }
+
+# ------------------------------------------------------- credential resolution
+
+env_var_names() {
+  # Aliases checked against the session environment, in priority order.
+  case $1 in
+    opencode-go) printf '%s\n' OPENCODE_GO_API_KEY OPENCODE_ZEN_GO_API_KEY ZEN_GO_API_KEY ;;
+    openrouter) printf '%s\n' OPENROUTER_API_KEY ;;
+    openai) printf '%s\n' OPENAI_API_KEY ;;
+  esac
+}
+
+key_from_env() {
+  local name
+  while IFS= read -r name; do
+    if [[ -n ${!name:-} ]]; then
+      printf '%s' "${!name}"
+      return 0
+    fi
+  done < <(env_var_names "$1")
+  return 1
+}
+
+default_agent() {
+  local agent=""
+  if command -v omarchy-default-agent >/dev/null 2>&1; then
+    agent=$(omarchy-default-agent 2>/dev/null || true)
+  fi
+  if [[ -z $agent ]]; then
+    local f="$HOME/.config/omarchy/defaults/agent"
+    if [[ -f $f ]]; then
+      agent=$(head -n1 "$f" | tr -d '[:space:]')
+    fi
+  fi
+  printf '%s' "$agent"
+}
+
+# Each adapter prints "provider=value" lines for every credential found in the
+# agent's own configuration. Only that agent's files are touched.
+
+creds_via_opencode() {
+  local auth="${OPENCODE_HOME:-$HOME/.local/share/opencode}/auth.json"
+  [[ -f $auth ]] || return 0
+  local p k
+  for p in opencode-go openrouter openai; do
+    k=$(jq -r --arg e "$p" '.[$e].key // empty' "$auth" 2>/dev/null || true)
+    if [[ -n $k ]]; then
+      printf '%s=%s\n' "$p" "$k"
+    fi
+  done
+}
+
+creds_via_claude() {
+  local settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+  [[ -f $settings ]] || return 0
+  local pair src prov k
+  for pair in OPENAI_API_KEY:openai OPENROUTER_API_KEY:openrouter; do
+    src=${pair%%:*} prov=${pair##*:}
+    k=$(jq -r --arg v "$src" '.env[$v] // empty' "$settings" 2>/dev/null || true)
+    if [[ -n $k ]]; then
+      printf '%s=%s\n' "$prov" "$k"
+    fi
+  done
+  # A Claude Code install routed at OpenCode Go carries its key as the
+  # Anthropic auth token paired with the zen base URL.
+  local token base
+  token=$(jq -r '.env.ANTHROPIC_AUTH_TOKEN // .env.ANTHROPIC_API_KEY // empty' "$settings" 2>/dev/null || true)
+  base=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$settings" 2>/dev/null || true)
+  if [[ -n $token && $base == *opencode.ai/zen* ]]; then
+    printf 'opencode-go=%s\n' "$token"
+  fi
+}
+
+creds_via_codex() {
+  local home="${CODEX_HOME:-$HOME/.codex}"
+  local auth="$home/auth.json" k
+  if [[ -f $auth ]]; then
+    k=$(jq -r '.OPENAI_API_KEY // empty' "$auth" 2>/dev/null || true)
+    if [[ -n $k ]]; then
+      printf 'openai=%s\n' "$k"
+    fi
+  fi
+  # A custom model_provider aimed at OpenCode's endpoints holds a literal
+  # api_key inside its table. The awk walks TOML tables without evaluating
+  # anything: remember whether the current table points at opencode, and take
+  # its api_key when it does.
+  local toml="$home/config.toml"
+  [[ -f $toml ]] || return 0
+  awk '
+    /^\[/ { in_zen = 0 }
+    /base_url[[:space:]]*=/ && /opencode\.ai/ { in_zen = 1 }
+    in_zen && match($0, /api_key[[:space:]]*=[[:space:]]*"([^"]+)"/, m) {
+      print "opencode-go=" m[1]; exit
+    }
+  ' "$toml"
+}
+
+creds_via_dsh() {
+  local envfile="${DSH_HOME:-$HOME/.dsh}/.env"
+  [[ -f $envfile ]] || return 0
+  local line k v
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [[ $line =~ ^([A-Z_]+)=(.*)$ ]] || continue
+    k=${BASH_REMATCH[1]} v=${BASH_REMATCH[2]}
+    case $k in
+      OPENAI_API_KEY) printf 'openai=%s\n' "$v" ;;
+      OPENROUTER_API_KEY) printf 'openrouter=%s\n' "$v" ;;
+      OPENCODE_GO_API_KEY|OPENCODE_ZEN_GO_API_KEY|ZEN_GO_API_KEY) printf 'opencode-go=%s\n' "$v" ;;
+    esac
+  done <"$envfile"
+}
+
+declare -A AGENT_CREDS=()
+
+load_agent_creds() {
+  local agent out line k v
+  agent=$(default_agent)
+  [[ -n $agent ]] || return 0
+  case $agent in
+    opencode) out=$(creds_via_opencode) ;;
+    claude) out=$(creds_via_claude) ;;
+    codex) out=$(creds_via_codex) ;;
+    dsh) out=$(creds_via_dsh) ;;
+    *) return 0 ;;
+  esac
+  while IFS= read -r line; do
+    [[ $line == *=* ]] || continue
+    k=${line%%=*} v=${line#*=}
+    [[ -n $k && -n $v ]] && AGENT_CREDS[$k]=$v
+  done <<<"$out"
+}
+
+key_from_file() {
+  local f="${OMARCHY_API_KEYS_FILE:-$HOME/.config/omarchy/api-keys.env}"
+  [[ -f $f ]] || return 1
+  local line name
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [[ $line == *=* && $line != \#* ]] || continue
+    while IFS= read -r name; do
+      if [[ $line == "$name="* ]]; then
+        printf '%s' "${line#"$name="}"
+        return 0
+      fi
+    done < <(env_var_names "$1")
+  done <"$f"
+  return 1
+}
+
+resolve_key() {
+  local p=$1 k
+  k=$(key_from_env "$p") && { printf '%s' "$k"; return 0; }
+  if [[ -n ${AGENT_CREDS[$p]:-} ]]; then
+    printf '%s' "${AGENT_CREDS[$p]}"
+    return 0
+  fi
+  k=$(key_from_file "$p") && { printf '%s' "$k"; return 0; }
+  return 1
+}
+
+# ------------------------------------------------------------ fetch utilities
 
 cached_json() {
   local url=$1 cachefile=$2 key=$3
@@ -65,7 +232,6 @@ write_record() {
 }
 
 record_envelope() {
-  # Shared skeleton so every extra provider speaks the panel's language.
   local id=$1 name=$2 tier=$3
   jq -n --arg now "$now" --arg id "$id" --arg name "$name" --arg tier "$tier" '
     {
@@ -106,10 +272,6 @@ usd() {
   awk -v v="$v" 'BEGIN { d = (v < 0 ? -v : v); printf "%s$%.4f", (v < 0 ? "-" : ""), d }'
 }
 
-pct1() {
-  awk -v v="$1" 'BEGIN { printf "%.1f%%", v * 100 }'
-}
-
 iso_next_month_start() {
   date -u -d "$(date -u +%Y-%m-01) +1 month" +%Y-%m-%dT00:00:00Z
 }
@@ -118,8 +280,7 @@ iso_next_month_start() {
 
 update_opencode_go() {
   local key
-  key=$(resolve_key OPENCODE_GO_API_KEY opencode-go)
-  [[ -n $key ]] || return 0
+  key=$(resolve_key opencode-go) || return 0
 
   local payload
   payload=$(cached_json "https://opencode.ai/zen/go/v1/usage" \
@@ -155,8 +316,7 @@ update_opencode_go() {
 
 update_openrouter() {
   local key
-  key=$(resolve_key OPENROUTER_API_KEY openrouter)
-  [[ -n $key ]] || return 0
+  key=$(resolve_key openrouter) || return 0
 
   local key_payload credits_payload=""
   key_payload=$(cached_json "https://openrouter.ai/api/v1/key" \
@@ -210,8 +370,7 @@ update_openrouter() {
 
 update_openai() {
   local key
-  key=$(resolve_key OPENAI_API_KEY openai)
-  [[ -n $key ]] || return 0
+  key=$(resolve_key openai) || return 0
 
   local sub usage_payload hard used
   sub=$(cached_json "https://api.openai.com/v1/dashboard/billing/subscription" \
@@ -241,6 +400,35 @@ update_openai() {
   write_record openai "$record"
 }
 
+# ----------------------------------------------------------------------- main
+
+case ${1:-} in
+  "")
+    ;;
+  --force)
+    force=true
+    ;;
+  --resolve)
+    [[ -n ${2:-} ]] || { usage >&2; exit 64; }
+    load_agent_creds
+    if key=$(resolve_key "$2"); then
+      printf '%s\n' "$key"
+      exit 0
+    fi
+    echo "no credential resolved for '$2'" >&2
+    exit 1
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 64
+    ;;
+esac
+
+load_agent_creds
 update_opencode_go
 update_openrouter
 update_openai

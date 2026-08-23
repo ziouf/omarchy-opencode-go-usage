@@ -22,7 +22,9 @@ Item {
 
   function refresh(force) {
     if (updateProc.running) return
-    var command = ["bash", "-c", "[[ -x \"$1\" ]] && exec \"$1\" \"$@\"", "bash", root.scriptPath]
+    // $1 is consumed by the guard itself: shift before exec so the script
+    // only ever sees the real flags.
+    var command = ["bash", "-c", "[[ -x \"$1\" ]] && { p=$1; shift; exec \"$p\" \"$@\"; }", "bash", root.scriptPath]
     if (force === true) command.push("--force")
     updateProc.command = command
     updateProc.running = true

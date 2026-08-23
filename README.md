@@ -42,22 +42,36 @@ omarchy-shell ziouf.opencode-go-quotas refresh
 
 ## Provider credentials
 
-Keys resolve from the environment first, then from OpenCode's own auth store
-(`~/.local/share/opencode/auth.json`, written by `/connect` in the TUI):
+Keys are resolved per provider — first hit wins:
 
-| Provider | Environment variable | auth.json entry |
-| --- | --- | --- |
-| OpenCode Go | `OPENCODE_GO_API_KEY` | `opencode-go` |
-| OpenRouter | `OPENROUTER_API_KEY` | `openrouter` |
-| OpenAI Platform | `OPENAI_API_KEY` | `openai` |
+1. **Session environment variables**: `OPENCODE_GO_API_KEY` (aliases:
+   `OPENCODE_ZEN_GO_API_KEY`, `ZEN_GO_API_KEY`), `OPENROUTER_API_KEY`,
+   `OPENAI_API_KEY`.
+2. **The system's default AI agent** (`omarchy default agent`): a dedicated
+   adapter reads that agent's own configuration files, so the plugin never
+   depends on one harness being installed.
 
-Claude Code, Codex, Fireworks and DeepSeek Harness keep using the stock
+   | Agent | Files read (read-only) |
+   | --- | --- |
+   | `opencode` | `~/.local/share/opencode/auth.json` |
+   | `claude` | `~/.claude/settings.json` `env` block — an `ANTHROPIC_AUTH_TOKEN` only counts when `ANTHROPIC_BASE_URL` points at `opencode.ai/zen` |
+   | `codex` | `~/.codex/auth.json`; literal `api_key` from `config.toml` `[model_providers.*]` tables aimed at `opencode.ai` |
+   | `dsh` | `~/.dsh/.env` |
+
+   Other agents (`pi`, `omp`, `grok`, `gemini`, `copilot`, `crush`) have no
+   adapter yet and simply contribute nothing.
+3. **Manual override file** `~/.config/omarchy/api-keys.env` — plain
+   `KEY=value` lines, parsed literally and never sourced:
+
+   ```bash
+   install -m 600 /dev/null ~/.config/omarchy/api-keys.env
+   printf 'OPENCODE_GO_API_KEY=%s\n' "sk-..." >> ~/.config/omarchy/api-keys.env
+   ```
+
+Agent configuration files are only ever read, never written. Their formats
+are private to each tool; adapters are covered by `tests/run.sh`. Claude
+Code, Codex, Fireworks and DeepSeek Harness usage stats keep using the stock
 Omarchy collectors untouched.
-
-To centralize API keys for several tools, export them from a session env file
-such as `~/.config/uwsm/env.d/api-keys.sh` (requires a session restart). Mind
-that session environment variables are readable by every process in your
-session; the `auth.json` fallback keeps keys scoped instead.
 
 ## How it works
 
