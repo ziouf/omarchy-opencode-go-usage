@@ -270,6 +270,14 @@ merge_fields() {
   jq -s '.[0] * .[1]' - "$1"
 }
 
+# TODO(balance): OpenCode Zen exposes no balance endpoint yet, so remaining
+# credits cannot be shown — tracked upstream in anomalyco/opencode#10448.
+# When it ships, fetch it here and populate the agents-panel `balance`
+# object (remaining/funded/spent/currency): the panel already renders that
+# natively as a BALANCE section. Endpoints probed 2026-08-23:
+#   api.opencode.ai/v1/credits -> HTTP 200 "Not Found" body (bogus success)
+#   opencode.ai/zen/v1/balance -> 404
+#   opencode.ai/zen/go/v1/credits -> 404
 update_opencode_go() {
   local key payload record
   key=$(resolve_key "$PROVIDER") || return 0
