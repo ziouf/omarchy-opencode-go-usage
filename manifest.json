@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "ziouf.opencode-go-quotas",
   "name": "OpenCode Go quotas",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "ziouf",
   "license": "MIT",
   "homepage": "https://github.com/ziouf/omarchy-opencode-go-quotas",
-  "description": "Enriches the built-in Agents panel with extra LLM quota tabs: OpenCode Go rolling 5-hour / weekly / monthly windows (official usage API), OpenRouter balance and caps, and OpenAI Platform monthly limits. No widget, no UI of its own — the stock Agents panel picks the new tabs up automatically.",
+  "description": "Enriches the built-in Agents panel with an OpenCode Go quota tab: rolling 5-hour, weekly, and monthly windows from the official OpenCode Zen usage API. No widget, no UI of its own — the stock panel picks the tab up automatically.",
   "kinds": ["service"],
   "keepLoaded": true,
   "entryPoints": {
@@ -14,7 +14,7 @@
   },
   "install": {
     "commands": [],
-    "notes": "`omarchy plugin add https://github.com/ziouf/omarchy-opencode-go-quotas.git --enable`, then make sure the service is listed in shell.json: { \"plugins\": [ { \"id\": \"ziouf.opencode-go-quotas\" } ] }. Tabs appear in your existing Agents panel as soon as provider credentials are found — nothing else to configure, and the panel itself is never modified or duplicated."
+    "notes": "`omarchy plugin add https://github.com/ziouf/omarchy-opencode-go-quotas.git --enable`, then make sure the service is listed in shell.json: { \"plugins\": [ { \"id\": \"ziouf.opencode-go-quotas\" } ] }. The tab appears in your existing Agents panel as soon as a credential is resolved — nothing else to configure, and the panel itself is never modified or duplicated."
   },
   "uninstall": {
     "commands": [
@@ -22,14 +22,9 @@
     ],
     "optional": [
       "rm -f \"$HOME/.local/state/omarchy/agents/usage/opencode-go.json\"",
-      "rm -f \"$HOME/.local/state/omarchy/agents/usage/openrouter.json\"",
-      "rm -f \"$HOME/.local/state/omarchy/agents/usage/openai.json\"",
       "rm -f \"$HOME/.cache/omarchy/opencode-go-usage.json\"",
-      "rm -f \"$HOME/.cache/omarchy/openrouter-key.json\"",
-      "rm -f \"$HOME/.cache/omarchy/openrouter-credits.json\"",
-      "rm -f \"$HOME/.cache/omarchy/openai-subscription.json\"",
-      "rm -f \"$HOME/.cache/omarchy/openai-usage.json\""
+      "rm -f \"$HOME/.config/omarchy/api-keys.env\"  # only if nothing else uses it"
     ],
-    "notes": "Removing the service stops the refreshes and unloads its tabs from the Agents panel on the next rescan. The commands above are documentation; run them manually for a spotless cleanup."
+    "notes": "Removing the service stops the refreshes and unloads the tab from the Agents panel on the next rescan. The commands above are documentation; run them manually for a spotless cleanup."
   }
 }

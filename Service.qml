@@ -10,7 +10,7 @@ Item {
 
   // Resolves next to this file, so the service works from any install path.
   readonly property string scriptPath: {
-    var url = Qt.resolvedUrl("scripts/update-llm-quotas").toString()
+    var url = Qt.resolvedUrl("scripts/update-opencode-go").toString()
     if (url.indexOf("file://") === 0) url = decodeURIComponent(url.substring(7))
     return url
   }
