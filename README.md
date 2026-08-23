@@ -12,7 +12,7 @@ replaced, patched, or duplicated.
 | **OpenRouter** | Balance and spending cap (live spend on free tier) | Official `api/v1/key` + `api/v1/credits` |
 | **OpenAI Platform** | Monthly usage vs. hard limit | Dashboard billing endpoints |
 
-Providers without stored credentials never appear; a failed fetch keeps the
+Providers without resolvable credentials never appear; a failed fetch keeps the
 previous record visible until the next attempt succeeds.
 
 ## Requirements
@@ -94,6 +94,22 @@ cleanup of records and caches:
 rm -f ~/.local/state/omarchy/agents/usage/{opencode-go,openrouter,openai}.json
 rm -f ~/.cache/omarchy/{opencode-go-usage,openrouter-key,openrouter-credits,openai-subscription,openai-usage}.json
 ```
+
+## Troubleshooting
+
+- **A provider tab never appears** — no credential resolved for it. Check
+  what the resolver finds, in the same order the service uses:
+
+  ```bash
+  bash ~/.config/omarchy/plugins/ziouf.opencode-go-quotas/scripts/update-llm-quotas \
+    --resolve opencode-go
+  ```
+
+  Exit code 1 with "no credential resolved" means every tier missed.
+- **Numbers look stale** — a fetch failed and the previous record is kept on
+  purpose; shell errors surface in `journalctl --user | grep -i
+  opencode-go-quotas`. Force a fresh pull with `omarchy-shell
+  ziouf.opencode-go-quotas refresh`.
 
 ## License
 

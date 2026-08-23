@@ -16,8 +16,9 @@ Item {
   }
 
   // The script caches each API response for a few minutes internally, so the
-  // wall-clock cadence here is cheap: providers without stored credentials
-  // exit immediately, failed fetches leave previous records untouched.
+  // wall-clock cadence here is cheap: providers without resolvable
+  // credentials exit immediately, failed fetches leave previous records
+  // untouched.
   readonly property int intervalSec: 300
 
   function refresh(force) {
