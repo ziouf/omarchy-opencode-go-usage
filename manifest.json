@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "ziouf.opencode-go-quotas",
+  "name": "OpenCode Go quotas",
+  "version": "1.0.0",
+  "author": "ziouf",
+  "license": "MIT",
+  "homepage": "https://github.com/ziouf/omarchy-opencode-go-quotas",
+  "description": "Enriches the built-in Agents panel with extra LLM quota tabs: OpenCode Go rolling 5-hour / weekly / monthly windows (official usage API), OpenRouter balance and caps, and OpenAI Platform monthly limits. No widget, no UI of its own — the stock Agents panel picks the new tabs up automatically.",
+  "kinds": ["service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  },
+  "install": {
+    "commands": [],
+    "notes": "`omarchy plugin add https://github.com/ziouf/omarchy-opencode-go-quotas.git --enable`, then make sure the service is listed in shell.json: { \"plugins\": [ { \"id\": \"ziouf.opencode-go-quotas\" } ] }. Tabs appear in your existing Agents panel as soon as provider credentials are found — nothing else to configure, and the panel itself is never modified or duplicated."
+  },
+  "uninstall": {
+    "commands": [
+      "omarchy plugin remove ziouf.opencode-go-quotas"
+    ],
+    "optional": [
+      "rm -f \"$HOME/.local/state/omarchy/agents/usage/opencode-go.json\"",
+      "rm -f \"$HOME/.local/state/omarchy/agents/usage/openrouter.json\"",
+      "rm -f \"$HOME/.local/state/omarchy/agents/usage/openai.json\"",
+      "rm -f \"$HOME/.cache/omarchy/opencode-go-usage.json\"",
+      "rm -f \"$HOME/.cache/omarchy/openrouter-key.json\"",
+      "rm -f \"$HOME/.cache/omarchy/openrouter-credits.json\"",
+      "rm -f \"$HOME/.cache/omarchy/openai-subscription.json\"",
+      "rm -f \"$HOME/.cache/omarchy/openai-usage.json\""
+    ],
+    "notes": "Removing the service stops the refreshes and unloads its tabs from the Agents panel on the next rescan. The commands above are documentation; run them manually for a spotless cleanup."
+  }
+}

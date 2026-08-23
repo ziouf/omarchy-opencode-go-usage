@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# omarchy:summary=Refresh LLM provider quota records for the agents panel
+# omarchy:args=[--force]
+# omarchy:examples=update-llm-quotas | update-llm-quotas --force
+
+# Writes one agent usage record per authenticated provider into
+# ~/.local/state/omarchy/agents/usage/, the directory the agents panel
+# watches. Providers without stored credentials are skipped silently; a
+# failed fetch leaves that provider's previous record untouched.
+#
+#   opencode-go  GET opencode.ai/zen/go/v1/usage          (rolling/weekly/monthly)
+#   openrouter   GET openrouter.ai/api/v1/key + /credits  (cap, balance)
+#   openai       GET api.openai.com dashboard billing     (monthly vs hard limit)
+#
+# Keys resolve from the environment first (OPENCODE_GO_API_KEY,
+# OPENROUTER_API_KEY, OPENAI_API_KEY — e.g. exported from
+# ~/.config/uwsm/env.d/*.sh), else from the matching entry of
+# ~/.local/share/opencode/auth.json that `/connect` maintains.
+
+set -euo pipefail
+
+AUTH="$HOME/.local/share/opencode/auth.json"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy"
+MAX_AGE=240
+
+force=false
+[[ ${1:-} == "--force" ]] && force=true
+mkdir -p "$CACHE_DIR" "$STATE_DIR"
+
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+resolve_key() {
+  local env_name=$1 auth_entry=$2
+  local key=${!env_name:-}
+  if [[ -z $key && -n $auth_entry ]]; then
+    key=$(jq -r --arg e "$auth_entry" '.[$e].key // empty' "$AUTH" 2>/dev/null || true)
+  fi
+  printf '%s' "$key"
+}
+
+cached_json() {
+  local url=$1 cachefile=$2 key=$3
+  if [[ -s $cachefile ]] && ! $force; then
+    local age=$(( $(date +%s) - $(stat -c %Y "$cachefile" 2>/dev/null || echo 0) ))
+    if (( age < MAX_AGE )); then
+      cat "$cachefile"
+      return 0
+    fi
+  fi
+  local payload
+  payload=$(printf 'Authorization: Bearer %s\nAccept: application/json\nUser-Agent: omarchy-agents-llm-quotas/1.0\n' "$key" |
+    curl -fsS --max-time 15 -H @- "$url") || return 1
+  jq -e . >/dev/null 2>&1 <<<"$payload" || return 1
+  printf '%s' "$payload" >"$cachefile"
+  cat "$cachefile"
+}
+
+write_record() {
+  local id=$1 json=$2 tmp
+  [[ -n $json ]] || return 0
+  tmp=$(mktemp "$STATE_DIR/.$id.XXXXXX")
+  printf '%s\n' "$json" >"$tmp"
+  mv "$tmp" "$STATE_DIR/$id.json"
+}
+
+record_envelope() {
+  # Shared skeleton so every extra provider speaks the panel's language.
+  local id=$1 name=$2 tier=$3
+  jq -n --arg now "$now" --arg id "$id" --arg name "$name" --arg tier "$tier" '
+    {
+      schemaVersion: 1,
+      id: $id,
+      name: $name,
+      updatedAt: $now,
+      ready: true,
+      hasLocalStats: false,
+      hasPromptStats: false,
+      scope: "account",
+      tierLabel: $tier,
+      usageStatusText: "",
+      infoLines: [],
+      limits: [],
+      recentDays: [],
+      activeDates: [],
+      activeDays: 0,
+      modelUsage: {},
+      todayPrompts: 0,
+      todaySessions: 0,
+      todayTotalTokens: 0,
+      totalPrompts: 0,
+      totalSessions: 0
+    }'
+}
+
+merge_fields() {
+  # $1 holds the provider-specific fields (a /dev/fd path); the shared
+  # envelope arrives on stdin. `*` gives precedence to its right-hand
+  # operand, so the provider fields are placed second.
+  jq -s '.[0] * .[1]' - "$1"
+}
+
+usd() {
+  # "$12.34", keeping four decimals under a dollar so near-zero spends stay legible.
+  local v=$1
+  awk -v v="$v" 'BEGIN { d = (v < 0 ? -v : v); printf "%s$%.4f", (v < 0 ? "-" : ""), d }'
+}
+
+pct1() {
+  awk -v v="$1" 'BEGIN { printf "%.1f%%", v * 100 }'
+}
+
+iso_next_month_start() {
+  date -u -d "$(date -u +%Y-%m-01) +1 month" +%Y-%m-%dT00:00:00Z
+}
+
+# ---------------------------------------------------------------- opencode-go
+
+update_opencode_go() {
+  local key
+  key=$(resolve_key OPENCODE_GO_API_KEY opencode-go)
+  [[ -n $key ]] || return 0
+
+  local payload
+  payload=$(cached_json "https://opencode.ai/zen/go/v1/usage" \
+    "$CACHE_DIR/opencode-go-usage.json" "$key") || return 0
+
+  local record
+  record=$(record_envelope opencode-go "OpenCode Go" "Subscription" |
+    merge_fields <(jq -n --argjson api "$payload" '
+      def entry($k; $label; $title):
+        ($api.usage[$k] // null)
+        | select(. != null and has("percent"))
+        | {
+            label: $label,
+            title: $title,
+            percent: (((.percent | tonumber) / 100 * 1000 | round) / 1000),
+            resetsAt: (.resetsAt // "")
+          };
+      {
+        usageStatusText: (
+          if ([$api.usage[]? | (.status // "ok")] | any(. != "ok"))
+          then "A quota window is exhausted" else "" end
+        ),
+        limits: [
+          entry("rolling"; "Session (5-hour)"; "Session"),
+          entry("weekly"; "Weekly"; "Weekly"),
+          entry("monthly"; "Monthly"; "Monthly")
+        ]
+      }'))
+  write_record opencode-go "$record"
+}
+
+# ----------------------------------------------------------------- openrouter
+
+update_openrouter() {
+  local key
+  key=$(resolve_key OPENROUTER_API_KEY openrouter)
+  [[ -n $key ]] || return 0
+
+  local key_payload credits_payload=""
+  key_payload=$(cached_json "https://openrouter.ai/api/v1/key" \
+    "$CACHE_DIR/openrouter-key.json" "$key") || return 0
+  credits_payload=$(cached_json "https://openrouter.ai/api/v1/credits" \
+    "$CACHE_DIR/openrouter-credits.json" "$key") || true
+
+  local data
+  data=$(jq '.data // {}' <<<"$key_payload")
+
+  local cap usage credits remaining
+  local no_credits='{"data":{}}'
+  cap=$(jq -r '.limit // 0 | tonumber' <<<"$data")
+  usage=$(jq -r '.usage // 0 | tonumber' <<<"$data")
+  credits=$(jq -r '.data.total_credits // 0 | tonumber' <<<"${credits_payload:-$no_credits}")
+
+  local tier limits_json="[]" balance_json="null" info_lines="[]"
+  tier=$(jq -r 'if .is_free_tier == true then "Free tier" else "API" end' <<<"$data")
+
+  if awk -v c="$cap" 'BEGIN { exit !(c > 0) }'; then
+    remaining=$(awk -v c="$cap" -v u="$usage" 'BEGIN { printf "%.2f", c - u }')
+    limits_json=$(jq -n --argjson pct "$(awk -v u="$usage" -v c="$cap" 'BEGIN { print (c > 0 ? u / c : 0) }')" '
+      [ { label: "Spending limit", title: "Limit",
+          percent: (($pct * 1000 | round) / 1000), resetsAt: "" } ]')
+    balance_json=$(jq -n --arg rem "$remaining" --argjson cap "$cap" --argjson usage "$usage" '
+      { remaining: ($rem | tonumber), funded: $cap, spent: $usage, currency: "USD" }')
+  elif awk -v c="$credits" 'BEGIN { exit !(c > 0) }'; then
+    remaining=$(awk -v c="$credits" -v u="$usage" 'BEGIN { r = c - u; printf "%.2f", (r < 0 ? 0 : r) }')
+    balance_json=$(jq -n --arg rem "$remaining" --argjson cr "$credits" --argjson usage "$usage" '
+      { remaining: ($rem | tonumber), funded: $cr, spent: $usage, currency: "USD" }')
+  else
+    local daily weekly monthly
+    daily=$(jq -r '.usage_daily // 0 | tonumber' <<<"$data")
+    weekly=$(jq -r '.usage_weekly // 0 | tonumber' <<<"$data")
+    monthly=$(jq -r '.usage_monthly // 0 | tonumber' <<<"$data")
+    info_lines=$(jq -cn \
+      --arg cap "No spending cap" \
+      --arg m "$(usd "$monthly") spent (30d)" \
+      --arg w "$(usd "$weekly") week · $(usd "$daily") day" \
+      '[ $cap, $m, $w ]')
+  fi
+
+  local record
+  record=$(record_envelope openrouter "OpenRouter" "$tier" |
+    merge_fields <(jq -n --argjson limits "$limits_json" --argjson balance "$balance_json" --argjson info "$info_lines" '
+      { limits: $limits, balance: $balance, infoLines: $info }'))
+  write_record openrouter "$record"
+}
+
+# --------------------------------------------------------------------- openai
+
+update_openai() {
+  local key
+  key=$(resolve_key OPENAI_API_KEY openai)
+  [[ -n $key ]] || return 0
+
+  local sub usage_payload hard used
+  sub=$(cached_json "https://api.openai.com/v1/dashboard/billing/subscription" \
+    "$CACHE_DIR/openai-subscription.json" "$key") || return 0
+  usage_payload=$(cached_json \
+    "https://api.openai.com/v1/dashboard/billing/usage?start_date=$(date -u -d "-29 days" +%Y-%m-%d)&end_date=$(date -u -d "+1 day" +%Y-%m-%d)" \
+    "$CACHE_DIR/openai-usage.json" "$key") || return 0
+
+  hard=$(jq -r '.hard_limit_usd // .system_hard_limit_usd // 0 | tonumber' <<<"$sub")
+  used=$(jq -r '.total_usage // 0 | tonumber' <<<"$usage_payload")
+  used=$(awk -v c="$used" 'BEGIN { printf "%.2f", c / 100 }')  # cents -> dollars
+
+  awk -v h="$hard" 'BEGIN { exit !(h > 0) }' || return 0
+
+  local percent resets_at
+  percent=$(awk -v u="$used" -v h="$hard" 'BEGIN { printf "%.3f", (u > h ? 1 : u / h) }')
+  resets_at=$(iso_next_month_start)
+
+  local record
+  record=$(record_envelope openai "OpenAI Platform" "Prepaid API" |
+    merge_fields <(jq -n --argjson pct "$percent" --arg reset "$resets_at" --arg spent "$(usd "$used")" --arg cap "$(usd "$hard")" '
+      {
+        infoLines: [ "Hard limit " + $cap + " · spent " + $spent + " (30d)" ],
+        limits: [ { label: "Monthly (hard limit)", title: "Monthly",
+                    percent: $pct, resetsAt: $reset } ]
+      }'))
+  write_record openai "$record"
+}
+
+update_opencode_go
+update_openrouter
+update_openai
