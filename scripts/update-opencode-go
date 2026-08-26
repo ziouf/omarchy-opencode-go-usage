@@ -35,6 +35,49 @@ mkdir -p "$CACHE_DIR" "$STATE_DIR"
 
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# --- i18n: the record strings the stock panel renders -----------------------
+LOCALE_ENV=(LC_ALL LANG LC_TIME)
+
+# Language comes from the system configuration: env vars first, then the
+# `locale` command, reduced to a two-letter code ("fr_FR.UTF-8" -> "fr").
+detect_locale() {
+  local var v=""
+  for var in "${LOCALE_ENV[@]}"; do
+    if [[ -n ${!var:-} ]]; then
+      v=${!var}; break
+    fi
+  done
+  [[ -z $v ]] && v=$(locale --category=default 2>/dev/null) || true
+  v=${v:-en}
+  case "$v" in
+    *[![:alpha:]]*) v=${v%%[^[:alpha:]]*} ;;
+  esac
+  printf '%s' "${v,,}"
+}
+
+LOC=$(detect_locale)
+
+# Strings keyed "<lang>.<key>" (English is the default the others fall back to).
+declare -A _STR
+_STR[en.rolling_label]="Session (5-hour)";   _STR[fr.rolling_label]="Session (5 heures)"
+_STR[en.rolling_title]="Session";            _STR[fr.rolling_title]="Session"
+_STR[en.weekly_label]="Weekly";              _STR[fr.weekly_label]="Hebdomadaire"
+_STR[en.weekly_title]="Weekly";              _STR[fr.weekly_title]="Hebdomadaire"
+_STR[en.monthly_label]="Monthly";            _STR[fr.monthly_label]="Mensuel"
+_STR[en.monthly_title]="Monthly";            _STR[fr.monthly_title]="Mensuel"
+_STR[en.status]="A quota window is exhausted"; _STR[fr.status]="Une fenêtre de quota est épuisée"
+_STR[en.tier]="Subscription";                _STR[fr.tier]="Abonnement"
+
+# Translate one record string ("<lang>.<key>") for a locale, falling back to
+# English, then to the key itself so nothing ever renders as blank.
+t() {
+  local loc=$1 key=$2 val
+  val=${_STR[$loc.$key]:-}
+  [[ -n $val ]] || val=${_STR[en.$key]:-}
+  [[ -n $val ]] || val=$key
+  printf '%s' "$val"
+}
+
 usage() {
   cat <<USAGE
 Usage: update-opencode-go [--force] [--resolve]
@@ -211,9 +254,14 @@ write_record() {
 # ------------------------------------------------------------------ record
 
 build_record() {
-  local payload=$1
+  local payload=$1 loc=$2
   record_envelope |
-    merge_fields <(jq -n --argjson api "$payload" '
+    merge_fields <(jq -n --argjson api "$payload" \
+      --arg r_l "$(t "$loc" rolling_label)" --arg r_t "$(t "$loc" rolling_title)" \
+      --arg w_l "$(t "$loc" weekly_label)" --arg w_t "$(t "$loc" weekly_title)" \
+      --arg m_l "$(t "$loc" monthly_label)" --arg m_t "$(t "$loc" monthly_title)" \
+      --arg status "$(t "$loc" status)" \
+      --arg tier "$(t "$loc" tier)" '
       def entry($k; $label; $title):
         ($api.usage[$k] // null)
         | select(. != null and has("percent"))
@@ -226,12 +274,13 @@ build_record() {
       {
         usageStatusText: (
           if ([$api.usage[]? | (.status // "ok")] | any(. != "ok"))
-          then "A quota window is exhausted" else "" end
+          then $status else "" end
         ),
+        tierLabel: $tier,
         limits: [
-          entry("rolling"; "Session (5-hour)"; "Session"),
-          entry("weekly"; "Weekly"; "Weekly"),
-          entry("monthly"; "Monthly"; "Monthly")
+          entry("rolling"; $r_l; $r_t),
+          entry("weekly"; $w_l; $w_t),
+          entry("monthly"; $m_l; $m_t)
         ]
       }')
 }
@@ -283,7 +332,7 @@ update_opencode_go() {
   key=$(resolve_key "$PROVIDER") || return 0
   payload=$(cached_json "https://opencode.ai/zen/go/v1/usage" \
     "$CACHE_DIR/opencode-go-usage.json" "$key") || return 0
-  record=$(build_record "$payload") || return 0
+  record=$(build_record "$payload" "$LOC") || return 0
   write_record "$record"
 }
 

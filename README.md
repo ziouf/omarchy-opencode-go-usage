@@ -13,6 +13,13 @@ monthly usage with meters, reset countdowns, and a red state past 90 %.
 Without resolvable credentials the tab never appears; a failed fetch keeps the
 previous record visible until the next attempt succeeds.
 
+## Language
+
+The tab's labels follow your system's locale (read from `$LANG`/`$LC_ALL`, or
+the `locale` command when those are unset). French and English are bundled; any
+other locale falls back to English. Only the tab's labels are localized — the
+credential resolution below never depends on the language.
+
 ## Requirements
 
 - Omarchy (Hyprland + omarchy-shell)

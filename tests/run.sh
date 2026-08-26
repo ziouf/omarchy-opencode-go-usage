@@ -37,6 +37,33 @@ check() {
 
 mk() { mkdir -p "$ROOT/$1"; }
 
+# ---- i18n: record strings follow the system locale -------------------------
+# Source just the translation unit (locale detection + string table) without
+# touching the network, then assert the rendered strings per locale.
+i18n() {
+  local loc=$1 want=$2 got
+  got=$(LANG="$loc" SCRIPT="$SCRIPT" bash -c '
+    source <(sed -n "/^LOCALE_ENV=/,/^}/p;/^t() {/,/^}/p;/^declare -A _STR/,/^_STR\[en.tier\]/p" "$SCRIPT")
+    loc=$(detect_locale); printf "%s|%s|%s|%s|%s|%s|%s|%s" \
+      "$(t $loc rolling_label)" "$(t $loc rolling_title)" \
+      "$(t $loc weekly_label)" "$(t $loc weekly_title)" \
+      "$(t $loc monthly_label)" "$(t $loc monthly_title)" \
+      "$(t $loc status)" "$(t $loc tier)"
+  ')
+  if [[ $got == "$want" ]]; then
+    pass=$((pass + 1))
+  else
+    echo "FAIL: i18n loc='$loc' got '$got' want '$want'" >&2
+    fail=$((fail + 1))
+  fi
+}
+
+# French is the primary UI language; English is the default everyone falls back to.
+i18n "fr_FR.UTF-8" "Session (5 heures)|Session|Hebdomadaire|Hebdomadaire|Mensuel|Mensuel|Une fenêtre de quota est épuisée|Abonnement"
+i18n "en_US.UTF-8" "Session (5-hour)|Session|Weekly|Weekly|Monthly|Monthly|A quota window is exhausted|Subscription"
+i18n "de_DE.UTF-8" "Session (5-hour)|Session|Weekly|Weekly|Monthly|Monthly|A quota window is exhausted|Subscription" # unknown locale -> English
+
+
 # ---- fixture: opencode as default agent ------------------------------------
 mk fx-opencode/.config/omarchy/defaults
 echo opencode >"$ROOT/fx-opencode/.config/omarchy/defaults/agent"
@@ -118,8 +145,11 @@ else
   fail=$((fail + 1))
 fi
 
-# Alias variables count as session env too.
-got=$(HOME="$ROOT/fx-opencode" ZEN_GO_API_KEY=from-alias \
+# Alias variables count as session env too. Strip any ambient OpenCode key
+# first so this test doesn't depend on the caller's environment.
+got=$(HOME="$ROOT/fx-opencode" \
+  env -u OPENCODE_GO_API_KEY -u OPENCODE_ZEN_GO_API_KEY \
+        ZEN_GO_API_KEY=from-alias \
   bash "$SCRIPT" --resolve 2>/dev/null)
 if [[ $got == from-alias ]]; then
   pass=$((pass + 1))
