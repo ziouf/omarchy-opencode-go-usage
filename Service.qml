@@ -19,7 +19,7 @@ Item {
   // wall-clock cadence here is cheap: providers without resolvable
   // credentials exit immediately, failed fetches leave previous records
   // untouched.
-  readonly property int intervalSec: 300
+  readonly property int intervalSec: 60
 
   function refresh(force) {
     if (updateProc.running) return
