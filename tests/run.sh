@@ -48,7 +48,7 @@ i18n() {
       "$(t $loc rolling_label)" "$(t $loc rolling_title)" \
       "$(t $loc weekly_label)" "$(t $loc weekly_title)" \
       "$(t $loc monthly_label)" "$(t $loc monthly_title)" \
-      "$(t $loc status)" "$(t $loc tier)"
+      "$(t $loc exhausted_word)" "$(t $loc tier)"
   ')
   if [[ $got == "$want" ]]; then
     pass=$((pass + 1))
@@ -59,9 +59,9 @@ i18n() {
 }
 
 # French is the primary UI language; English is the default everyone falls back to.
-i18n "fr_FR.UTF-8" "Session (5 heures)|Session|Hebdomadaire|Hebdomadaire|Mensuel|Mensuel|Une fenêtre de quota est épuisée|Abonnement"
-i18n "en_US.UTF-8" "Session (5-hour)|Session|Weekly|Weekly|Monthly|Monthly|A quota window is exhausted|Subscription"
-i18n "de_DE.UTF-8" "Session (5-hour)|Session|Weekly|Weekly|Monthly|Monthly|A quota window is exhausted|Subscription" # unknown locale -> English
+i18n "fr_FR.UTF-8" "Session (5 heures)|Session|Hebdomadaire|Hebdomadaire|Mensuel|Mensuel|épuisé|Abonnement"
+i18n "en_US.UTF-8" "Session (5-hour)|Session|Weekly|Weekly|Monthly|Monthly|exhausted|Subscription"
+i18n "de_DE.UTF-8" "Session (5-hour)|Session|Weekly|Weekly|Monthly|Monthly|exhausted|Subscription" # unknown locale -> English
 
 
 # ---- fixture: opencode as default agent ------------------------------------

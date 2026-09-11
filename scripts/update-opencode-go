@@ -65,7 +65,9 @@ _STR[en.weekly_label]="Weekly";              _STR[fr.weekly_label]="Hebdomadaire
 _STR[en.weekly_title]="Weekly";              _STR[fr.weekly_title]="Hebdomadaire"
 _STR[en.monthly_label]="Monthly";            _STR[fr.monthly_label]="Mensuel"
 _STR[en.monthly_title]="Monthly";            _STR[fr.monthly_title]="Mensuel"
-_STR[en.status]="A quota window is exhausted"; _STR[fr.status]="Une fenêtre de quota est épuisée"
+_STR[en.exhausted_word]="exhausted";   _STR[fr.exhausted_word]="épuisé"
+_STR[en.reset_word]="resets";          _STR[fr.reset_word]="réinit."
+_STR[en.reset_fmt]=" %d/%m at %H:%M";  _STR[fr.reset_fmt]=" %d/%m à %H:%M"
 _STR[en.tier]="Subscription";                _STR[fr.tier]="Abonnement"
 
 # Translate one record string ("<lang>.<key>") for a locale, falling back to
@@ -260,7 +262,8 @@ build_record() {
       --arg r_l "$(t "$loc" rolling_label)" --arg r_t "$(t "$loc" rolling_title)" \
       --arg w_l "$(t "$loc" weekly_label)" --arg w_t "$(t "$loc" weekly_title)" \
       --arg m_l "$(t "$loc" monthly_label)" --arg m_t "$(t "$loc" monthly_title)" \
-      --arg status "$(t "$loc" status)" \
+      --arg ex_w "$(t "$loc" exhausted_word)" --arg rst_w "$(t "$loc" reset_word)" \
+      --arg rst_fmt "$(t "$loc" reset_fmt)" \
       --arg tier "$(t "$loc" tier)" '
       def entry($k; $label; $title):
         ($api.usage[$k] // null)
@@ -269,12 +272,21 @@ build_record() {
             label: $label,
             title: $title,
             percent: (((.percent | tonumber) / 100 * 1000 | round) / 1000),
-            resetsAt: (.resetsAt // "")
+            resetsAt: (.resetsAt // ""),
+            status: (.status // "ok")
           };
+      def titleof($k): if $k == "rolling" then $r_t elif $k == "weekly" then $w_t
+        elif $k == "monthly" then $m_t else $k end;
+      # Name the exhausted window(s) and say when they reset — a generic
+      # "a window is exhausted" tells you nothing you can act on.
+      def resetstr($ts): ($ts | if test("\\.") then sub("\\.[0-9]+"; "") else . end
+        | fromdateiso8601 | strflocaltime($rst_fmt));
       {
         usageStatusText: (
-          if ([$api.usage[]? | (.status // "ok")] | any(. != "ok"))
-          then $status else "" end
+          [ $api.usage | to_entries[]
+            | select((.value.status // "ok") != "ok" and (.value.resetsAt // "") != "")
+            | titleof(.key) + " " + $ex_w + " · " + $rst_w + resetstr(.value.resetsAt)
+          ] | join("; ")
         ),
         tierLabel: $tier,
         limits: [
