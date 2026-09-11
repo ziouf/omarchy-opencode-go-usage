@@ -29,6 +29,7 @@ PROVIDER=opencode-go
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy"
 MAX_AGE=240
+OPENCODE_DB="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db"
 
 force=false
 mkdir -p "$CACHE_DIR" "$STATE_DIR"
@@ -339,12 +340,63 @@ merge_fields() {
 #   api.opencode.ai/v1/credits -> HTTP 200 "Not Found" body (bogus success)
 #   opencode.ai/zen/v1/balance -> 404
 #   opencode.ai/zen/go/v1/credits -> 404
+
+# ------------------------------------------------- per-model token usage
+#
+# OpenCode Zen's usage endpoint returns aggregate limits only (percent,
+# resetsAt, status). Per-model token breakdown comes from the local
+# OpenCode SQLite database instead: the `message` table stores every
+# assistant response with the model ID and a tokens object (input,
+# output, cache.read). We roll that up per modelID for the week.
+#
+# This is a local, no-network addition — no credential is involved and
+# a missing database (or a sqlite3 that is not on PATH) degrades
+# gracefully: the modelUsage object stays empty and the panel renders
+# the limits section as before.
+
+db_model_usage() {
+  local db="$1" loc="$2"
+  [[ -f $db ]] || return 0
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  local loc_code="${loc%%.*}"
+  [[ -z $loc_code ]] && loc_code="en"
+
+  sqlite3 -json "$db" <<SQL
+    SELECT
+      json_extract(data, '$.modelID')     AS modelID,
+      COUNT(*)                            AS n,
+      SUM(json_extract(data, '$.tokens.input'))      AS input_tokens,
+      SUM(json_extract(data, '$.tokens.output'))     AS output_tokens,
+      SUM(json_extract(data, '$.tokens.cache.read')) AS cache_read_tokens,
+      SUM(json_extract(data, '$.tokens.total'))      AS total_tokens
+    FROM message
+    WHERE json_extract(data, '$.providerID') = '$PROVIDER'
+      AND json_extract(data, '$.tokens.input') IS NOT NULL
+      AND time_created > (strftime('%s', 'now') - 7 * 86400) * 1000
+    GROUP BY json_extract(data, '$.modelID')
+    ORDER BY input_tokens DESC
+    LIMIT 5
+SQL
+  return 0
+}
+
 update_opencode_go() {
   local key payload record
   key=$(resolve_key "$PROVIDER") || return 0
   payload=$(cached_json "https://opencode.ai/zen/go/v1/usage" \
     "$CACHE_DIR/opencode-go-usage.json" "$key") || return 0
   record=$(build_record "$payload" "$LOC") || return 0
+  # Per-model token usage from the local OpenCode database. The panel
+  # already renders a "TOKENS BY MODEL" section; this fills it in.
+  local db_usage
+  db_usage=$(db_model_usage "$OPENCODE_DB" "$LOC" 2>/dev/null) || true
+  if [[ -n $db_usage ]]; then
+    local jq_tmp
+    jq_tmp=$(mktemp)
+    printf '%s\n' "$db_usage" > "$jq_tmp"
+    record=$(printf '%s\n' "$record" | jq --slurpfile usage "$jq_tmp" '.modelUsage = ($usage[0] | map(select(.modelID != null and .modelID != "")) | reduce .[] as $m ({}; .[$m.modelID] = { input_tokens: ($m.input_tokens | tonumber), output_tokens: ($m.output_tokens | tonumber), cache_read_tokens: ($m.cache_read_tokens | tonumber), total_tokens: ($m.total_tokens | tonumber), sessions: ($m.n | tonumber) }))')
+    rm -f "$jq_tmp"
+  fi
   write_record "$record"
 }
 
