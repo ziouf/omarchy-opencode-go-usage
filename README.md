@@ -1,14 +1,17 @@
 # LLM quotas for Omarchy
 
 A **service plugin** that enriches the built-in [Omarchy](https://omarchy.org)
-**Agents** panel with LLM quota tabs, starting with **OpenCode Go**. It ships no widget and no
+**Agents** panel with LLM quota tabs: **OpenCode Go** and **OpenRouter**. It ships no widget and no
 UI of its own: it only writes the usage record where the stock panel already
 looks, so your existing Agents tab grows the provider automatically — nothing
 is replaced, patched, or duplicated.
 
-The tab shows the three subscription windows from the official OpenCode Zen
-API (`GET https://opencode.ai/zen/go/v1/usage`): rolling 5-hour, weekly, and
-monthly usage with meters, reset countdowns, and a red state past 90 %.
+The tabs show live quotas, one tab per provider with a resolvable credential:
+
+| Tab | Endpoint | What you see |
+| --- | --- | --- |
+| OpenCode Go | `GET https://opencode.ai/zen/go/v1/usage` | rolling 5-hour, weekly, and monthly usage with meters, reset countdowns, and a red state past 90 % |
+| OpenRouter | `GET https://openrouter.ai/api/v1/key` | credit balance (remaining / funded / spent, USD) plus a monthly-spend meter when the key carries a cap; cap-less keys show the monthly spend as text instead of a percentage |
 
 Without resolvable credentials the tab never appears; a failed fetch keeps the
 previous record visible until the next attempt succeeds.
@@ -38,7 +41,7 @@ Then make sure the service is enabled in `~/.config/omarchy/shell.json`
 { "plugins": [ { "id": "ziouf.llm-quotas" } ] }
 ```
 
-Open your Agents bar widget: the OpenCode Go tab is there. The service
+Open your Agents bar widget: the OpenCode Go and OpenRouter tabs are there. The service
 refreshes every minute; you can force it with:
 
 ```bash
@@ -50,14 +53,15 @@ omarchy-shell ziouf.llm-quotas refresh
 The key is resolved on every refresh — first hit wins:
 
 1. **Session environment variables**: `OPENCODE_GO_API_KEY` (aliases:
-   `OPENCODE_ZEN_GO_API_KEY`, `ZEN_GO_API_KEY`).
+   `OPENCODE_ZEN_GO_API_KEY`, `ZEN_GO_API_KEY`) for OpenCode Go,
+   `OPENROUTER_API_KEY` for OpenRouter.
 2. **The system's default AI agent** (`omarchy default agent`): a dedicated
    adapter reads that agent's own configuration files, so the plugin never
    depends on one harness being installed.
 
    | Agent | Files read (read-only) |
    | --- | --- |
-   | `opencode` | `~/.local/share/opencode/auth.json`, `opencode-go` entry |
+   | `opencode` | `~/.local/share/opencode/auth.json`, `opencode-go` and `openrouter` entries |
    | `claude` | `~/.claude/settings.json` `env` block — an `ANTHROPIC_AUTH_TOKEN` only counts when `ANTHROPIC_BASE_URL` points at `opencode.ai/zen` |
    | `codex` | literal `api_key` from `[model_providers.*]` tables in `~/.codex/config.toml` aimed at `opencode.ai` |
    | `dsh` | `~/.dsh/.env` |
@@ -111,6 +115,8 @@ cleanup:
 ```bash
 rm -f ~/.local/state/omarchy/agents/usage/opencode-go.json
 rm -f ~/.cache/omarchy/opencode-go-usage.json
+rm -f ~/.local/state/omarchy/agents/usage/openrouter.json
+rm -f ~/.cache/omarchy/openrouter-key.json
 rm -f ~/.config/omarchy/api-keys.env   # only if nothing else uses it
 ```
 

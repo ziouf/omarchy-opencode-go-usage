@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "ziouf.llm-quotas",
   "name": "LLM quotas",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": "ziouf",
   "license": "MIT",
   "homepage": "https://github.com/ziouf/omarchy-opencode-go-quotas",
-  "description": "Enriches the built-in Agents panel with LLM quota tabs, starting with OpenCode Go's rolling 5-hour, weekly, and monthly windows from the official OpenCode Zen usage API. No widget, no UI of its own — the stock panel picks tabs up automatically.",
+  "description": "Enriches the built-in Agents panel with LLM quota tabs: OpenCode Go's rolling 5-hour, weekly, and monthly windows (official OpenCode Zen usage API) plus OpenRouter key credits and monthly spend (official key API). No widget, no UI of its own — the stock panel picks tabs up automatically.",
   "kinds": ["service"],
   "keepLoaded": true,
   "entryPoints": {
@@ -23,6 +23,8 @@
     "optional": [
       "rm -f \"$HOME/.local/state/omarchy/agents/usage/opencode-go.json\"",
       "rm -f \"$HOME/.cache/omarchy/opencode-go-usage.json\"",
+      "rm -f \"$HOME/.local/state/omarchy/agents/usage/openrouter.json\"",
+      "rm -f \"$HOME/.cache/omarchy/openrouter-key.json\"",
       "rm -f \"$HOME/.config/omarchy/api-keys.env\"  # only if nothing else uses it"
     ],
     "notes": "Removing the service stops the refreshes and unloads the tabs from the Agents panel on the next rescan. The commands above are documentation; run them manually for a spotless cleanup."

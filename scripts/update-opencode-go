@@ -69,6 +69,8 @@ _STR[en.exhausted_word]="exhausted";   _STR[fr.exhausted_word]="épuisé"
 _STR[en.reset_word]="resets";          _STR[fr.reset_word]="réinit."
 _STR[en.reset_fmt]=" %d/%m at %H:%M";  _STR[fr.reset_fmt]=" %d/%m à %H:%M"
 _STR[en.tier]="Subscription";                _STR[fr.tier]="Abonnement"
+_STR[en.or_tier]="Pay as you go";            _STR[fr.or_tier]="Paiement à l'usage"
+_STR[en.or_nocap]="spent this month, no cap on this key"; _STR[fr.or_nocap]="dépensés ce mois-ci, sans plafond sur cette clé"
 
 # Translate one record string ("<lang>.<key>") for a locale, falling back to
 # English, then to the key itself so nothing ever renders as blank.
@@ -92,7 +94,10 @@ USAGE
 # ------------------------------------------------------- credential resolution
 
 env_var_names() {
-  printf '%s\n' OPENCODE_GO_API_KEY OPENCODE_ZEN_GO_API_KEY ZEN_GO_API_KEY
+  case ${1:-$PROVIDER} in
+    openrouter) printf '%s\n' OPENROUTER_API_KEY ;;
+    *) printf '%s\n' OPENCODE_GO_API_KEY OPENCODE_ZEN_GO_API_KEY ZEN_GO_API_KEY ;;
+  esac
 }
 
 key_from_env() {
@@ -120,17 +125,18 @@ default_agent() {
   printf '%s' "$agent"
 }
 
-# Each adapter prints "provider=value" lines for every OpenCode Go credential
+# Each adapter prints "provider=value" lines for every matching credential
 # found in the agent's own configuration. Only that agent's files are touched,
 # and never written.
 
 creds_via_opencode() {
+  local entry=${1:-$PROVIDER}
   local auth="${OPENCODE_HOME:-$HOME/.local/share/opencode}/auth.json"
   [[ -f $auth ]] || return 0
   local k
-  k=$(jq -r --arg e "$PROVIDER" '.[$e].key // empty' "$auth" 2>/dev/null || true)
+  k=$(jq -r --arg e "$entry" '.[$e].key // empty' "$auth" 2>/dev/null || true)
   if [[ -n $k ]]; then
-    printf '%s=%s\n' "$PROVIDER" "$k"
+    printf '%s=%s\n' "$entry" "$k"
   fi
 }
 
@@ -184,7 +190,7 @@ load_agent_creds() {
   agent=$(default_agent)
   [[ -n $agent ]] || return 0
   case $agent in
-    opencode) out=$(creds_via_opencode) ;;
+    opencode) out=$( { creds_via_opencode opencode-go; creds_via_opencode openrouter; } ) ;; # both entries, one walk
     claude) out=$(creds_via_claude) ;;
     codex) out=$(creds_via_codex) ;;
     dsh) out=$(creds_via_dsh) ;;
@@ -247,17 +253,17 @@ cached_json() {
 }
 
 write_record() {
-  local tmp
-  tmp=$(mktemp "$STATE_DIR/.opencode-go.XXXXXX")
-  printf '%s\n' "$1" >"$tmp"
-  mv "$tmp" "$STATE_DIR/opencode-go.json"
+  local record=$1 dest=$2 tmp
+  tmp=$(mktemp "$STATE_DIR/.tmp.XXXXXX")
+  printf '%s\n' "$record" >"$tmp"
+  mv "$tmp" "$dest"
 }
 
 # ------------------------------------------------------------------ record
 
 build_record() {
   local payload=$1 loc=$2
-  record_envelope |
+  record_envelope "$PROVIDER" "OpenCode Go" |
     merge_fields <(jq -n --argjson api "$payload" \
       --arg r_l "$(t "$loc" rolling_label)" --arg r_t "$(t "$loc" rolling_title)" \
       --arg w_l "$(t "$loc" weekly_label)" --arg w_t "$(t "$loc" weekly_title)" \
@@ -298,7 +304,8 @@ build_record() {
 }
 
 record_envelope() {
-  jq -n --arg now "$now" --arg id "$PROVIDER" --arg name "OpenCode Go" '
+  local id=${1:-$PROVIDER} name=${2:-$id}
+  jq -n --arg now "$now" --arg id "$id" --arg name "$name" '
     {
       schemaVersion: 1,
       id: $id,
@@ -339,13 +346,84 @@ merge_fields() {
 #   api.opencode.ai/v1/credits -> HTTP 200 "Not Found" body (bogus success)
 #   opencode.ai/zen/v1/balance -> 404
 #   opencode.ai/zen/go/v1/credits -> 404
+# ------------------------------------------------------------- openrouter
+#
+# GET https://openrouter.ai/api/v1/key answers for the calling key itself
+# (no management key needed): {data:{limit, limit_remaining, limit_reset,
+# usage, usage_daily/weekly/monthly}}. Credits map to the panel's balance
+# object (remaining/funded/spent, USD); the monthly spend doubles as a
+# single Monthly limit when the key carries a cap. A cap-less key reports
+# usage as an info line instead of a percentage — a meter without a cap
+# would be a lie.
+
+# First of next month, 00:00 UTC — the monthly key-cap reset anchor when
+# OpenRouter reports limit_reset=monthly (no timestamp is given).
+next_month_start() {
+  date -u -d "$(date -u +%Y-%m-01) +1 month" +%Y-%m-%dT%H:%M:%SZ
+}
+
+build_openrouter_record() {
+  local payload=$1 loc=$2 reset_iso reset_pretty
+  reset_iso=$(next_month_start)
+  reset_pretty=$(date -u -d "$(date -u +%Y-%m-01) +1 month" +"$(t "$loc" reset_fmt)")
+  record_envelope "openrouter" "OpenRouter" |
+    merge_fields <(jq -n --argjson api "$payload" \
+      --arg m_l "$(t "$loc" monthly_label)" --arg m_t "$(t "$loc" monthly_title)" \
+      --arg ex_w "$(t "$loc" exhausted_word)" --arg rst_w "$(t "$loc" reset_word)" \
+      --arg tier "$(t "$loc" or_tier)" \
+      --arg nocap "$(t "$loc" or_nocap)" \
+      --arg reset_iso "$reset_iso" --arg reset_pretty "$reset_pretty" '
+      ($api.data // null) as $d
+      | ($d.limit // null) as $limit
+      | ($d.limit_remaining // null) as $remaining
+      | (($d.usage_monthly // 0) | tonumber) as $used
+      | (if $limit == null then null else ($limit | tonumber) end) as $cap
+      | (if $cap == null or $cap <= 0 then false else true end) as $has_cap
+      | (if $has_cap then $used / $cap else null end) as $ratio
+      | (if $ratio == null then null else ([0, $ratio, 1] | sort | .[1]) end) as $clamped
+      | {
+          tierLabel: $tier,
+          usageStatusText: (
+            if ($has_cap and $remaining != null and $remaining <= 0)
+            then $m_t + " " + $ex_w + " · " + $rst_w + $reset_pretty else "" end
+          ),
+          infoLines: (
+            if $has_cap then [] else ["$" + ($used | tostring) + " " + $nocap] end
+          ),
+          limits: (
+            if $has_cap then [{
+              label: $m_l, title: $m_t,
+              percent: (($clamped * 1000 | round) / 1000),
+              resetsAt: (if ($d.limit_reset // "") == "monthly" then $reset_iso else "" end)
+            }] else [] end
+          )
+        }
+        + (if $has_cap and $remaining != null then {
+          balance: {
+            remaining: $remaining,
+            funded: $cap,
+            spent: ((($cap - $remaining) * 100 | round) / 100),
+            currency: "USD"
+          }
+        } else {} end)')
+}
+
+update_openrouter() {
+  local key payload record
+  key=$(resolve_key "openrouter") || return 0
+  payload=$(cached_json "https://openrouter.ai/api/v1/key" \
+    "$CACHE_DIR/openrouter-key.json" "$key") || return 0
+  record=$(build_openrouter_record "$payload" "$LOC") || return 0
+  write_record "$record" "$STATE_DIR/openrouter.json"
+}
+
 update_opencode_go() {
   local key payload record
   key=$(resolve_key "$PROVIDER") || return 0
   payload=$(cached_json "https://opencode.ai/zen/go/v1/usage" \
     "$CACHE_DIR/opencode-go-usage.json" "$key") || return 0
   record=$(build_record "$payload" "$LOC") || return 0
-  write_record "$record"
+  write_record "$record" "$STATE_DIR/opencode-go.json"
 }
 
 # ----------------------------------------------------------------------- main
@@ -358,11 +436,11 @@ case ${1:-} in
     ;;
   --resolve)
     load_agent_creds
-    if key=$(resolve_key "$PROVIDER"); then
+    if key=$(resolve_key "${2:-$PROVIDER}"); then
       printf '%s\n' "$key"
       exit 0
     fi
-    echo "no credential resolved for '$PROVIDER'" >&2
+    echo "no credential resolved for '${2:-$PROVIDER}'" >&2
     exit 1
     ;;
   -h | --help)
@@ -377,3 +455,4 @@ esac
 
 load_agent_creds
 update_opencode_go
+update_openrouter
