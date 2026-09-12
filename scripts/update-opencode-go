@@ -239,7 +239,7 @@ cached_json() {
     fi
   fi
   local payload
-  payload=$(printf 'Authorization: Bearer %s\nAccept: application/json\nUser-Agent: omarchy-opencode-go-quotas/1.0\n' "$key" |
+  payload=$(printf 'Authorization: Bearer %s\nAccept: application/json\nUser-Agent: omarchy-llm-quotas/1.0\n' "$key" |
     curl -fsS --max-time 15 -H @- "$url") || return 1
   jq -e . >/dev/null 2>&1 <<<"$payload" || return 1
   printf '%s' "$payload" >"$cachefile"

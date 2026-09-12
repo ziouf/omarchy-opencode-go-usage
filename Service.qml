@@ -32,7 +32,7 @@ Item {
   }
 
   IpcHandler {
-    target: "ziouf.opencode-go-quotas"
+    target: "ziouf.llm-quotas"
 
     function refresh(): string { root.refresh(true); return "ok" }
   }
@@ -41,7 +41,6 @@ Item {
     interval: root.intervalSec * 1000
     running: true
     repeat: true
-    triggeredOnStart: true
     onTriggered: root.refresh()
   }
 
@@ -50,7 +49,7 @@ Item {
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("opencode-go-quotas", text.trim())
+      onStreamFinished: if (text.trim() !== "") console.warn("llm-quotas", text.trim())
     }
   }
 }

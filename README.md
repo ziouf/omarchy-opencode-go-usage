@@ -1,7 +1,7 @@
-# OpenCode Go quotas for Omarchy
+# LLM quotas for Omarchy
 
 A **service plugin** that enriches the built-in [Omarchy](https://omarchy.org)
-**Agents** panel with an **OpenCode Go** quota tab. It ships no widget and no
+**Agents** panel with LLM quota tabs, starting with **OpenCode Go**. It ships no widget and no
 UI of its own: it only writes the usage record where the stock panel already
 looks, so your existing Agents tab grows the provider automatically — nothing
 is replaced, patched, or duplicated.
@@ -35,14 +35,14 @@ Then make sure the service is enabled in `~/.config/omarchy/shell.json`
 (`omarchy plugin add --enable` normally does it):
 
 ```json
-{ "plugins": [ { "id": "ziouf.opencode-go-quotas" } ] }
+{ "plugins": [ { "id": "ziouf.llm-quotas" } ] }
 ```
 
 Open your Agents bar widget: the OpenCode Go tab is there. The service
-refreshes every 5 minutes; you can force it with:
+refreshes every minute; you can force it with:
 
 ```bash
-omarchy-shell ziouf.opencode-go-quotas refresh
+omarchy-shell ziouf.llm-quotas refresh
 ```
 
 ## Credential resolution
@@ -89,7 +89,7 @@ is cached a few minutes, so polling stays polite).
   finds, in the same order the service uses:
 
   ```bash
-  bash ~/.config/omarchy/plugins/ziouf.opencode-go-quotas/scripts/update-opencode-go \
+  bash ~/.config/omarchy/plugins/ziouf.llm-quotas/scripts/update-opencode-go \
     --resolve
   ```
 
@@ -97,12 +97,12 @@ is cached a few minutes, so polling stays polite).
 - **Numbers look stale** — a fetch failed and the previous record is kept on
   purpose; shell errors surface in `journalctl --user | grep -i
   opencode-go`. Force a fresh pull with `omarchy-shell
-  ziouf.opencode-go-quotas refresh`.
+  ziouf.llm-quotas refresh`.
 
 ## Uninstall
 
 ```bash
-omarchy plugin remove ziouf.opencode-go-quotas
+omarchy plugin remove ziouf.llm-quotas
 ```
 
 The tab disappears from the Agents panel on the next rescan. Optional spotless
