@@ -338,6 +338,23 @@ else
   fail=$((fail + 1))
 fi
 
+# scan_stats must translate bash truthiness to the scanner's --force flag:
+# a bare "true" would be an argparse error and silently yield no stats.
+# (SCAN_HELPER is re-pointed because HERE resolves against the sourced
+# process-substitution path, not the real script location.)
+got=$(HOME="$ROOT/fx-scan" XDG_DATA_HOME="$ROOT/fx-scan/data" XDG_CACHE_HOME="$ROOT/fx-scan/cache" \
+  SCRIPT="$SCRIPT" SCAN="$SCANNER" bash -c '
+    source <(sed -n "/^PROVIDER=/,/^MAX_AGE=/p;/^scan_stats() {/,/^}/p" "$SCRIPT")
+    SCAN_HELPER="$SCAN"
+    scan_stats "$PROVIDER" true | jq -c .totalPrompts
+  ')
+if [[ $got == 4 ]]; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: scan_stats force-flag translation (got '$got')" >&2
+  fail=$((fail + 1))
+fi
+
 # ---- record integration: stats merge into the opencode-go record ------------
 # Source just the record builders (no fetch, no writes) and assert the record
 # carries the stats (hasLocalStats, device scope) or stays quota-only.

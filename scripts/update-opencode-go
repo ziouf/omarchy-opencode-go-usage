@@ -274,9 +274,9 @@ write_record() {
 # stock panel renders natively. A scan failure degrades to a quota-only
 # record rather than going stale entirely.
 scan_stats() {
-  local provider=${1:-$PROVIDER} force=${2:-} stats
-  # $force is intentionally unquoted: empty means no flag.
-  stats=$("$SCAN_HELPER" "$provider" $force 2>/dev/null) || return 1
+  local provider=${1:-$PROVIDER} force=${2:-} stats flag=""
+  [[ $force == "true" ]] && flag="--force"
+  stats=$("$SCAN_HELPER" "$provider" $flag 2>/dev/null) || return 1
   printf '%s' "$stats"
 }
 
