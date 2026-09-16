@@ -229,5 +229,138 @@ ormap en "$OR_NULL" '{"tier":"Pay as you go","rem":null,"funded":null,"spent":nu
 ormap fr "$OR_NOCAP" '{"tier":"Paiement à l'"'"'usage","rem":null,"funded":null,"spent":null,"cur":null,"title":null,"pct":null,"reset_ok":false,"info":["$10 dépensés ce mois-ci, sans plafond sur cette clé"],"status_ok":false}' "openrouter fr cap 0 -> info line"
 ormap en "$OR_EMPTY" '{"tier":"Pay as you go","rem":0,"funded":100,"spent":100,"cur":"USD","title":"Monthly","pct":1,"reset_ok":true,"info":[],"status_ok":true}' "openrouter en exhausted status"
 
+# ---- local stats scan (fixture database, no network) ------------------------
+# Messages follow the opencode schema (message: session_id, data) with the
+# exact-match fields the scanner filters on: role, providerID, modelID, tokens.
+build_db() {
+  python3 - "$1" <<'PY'
+import json, sqlite3, sys, time
+db = sqlite3.connect(sys.argv[1])
+db.execute("CREATE TABLE message (session_id TEXT, data TEXT)")
+now_ms = int(time.time() * 1000)
+day = 86400 * 1000
+
+def msg(sid, ts, role, provider, model, tokens):
+    return (sid, json.dumps({
+        "role": role, "providerID": provider, "modelID": model,
+        "time": {"created": ts}, "tokens": tokens,
+    }))
+
+rows = [
+    # s1/s2 today, deepseek-v4-flash; s3 two days ago, slash-prefixed model id
+    # (model name must normalize to the final segment); s7 eight days ago,
+    # inside the all-time totals but outside the 7-day window.
+    msg("s1", now_ms, "assistant", "opencode-go", "deepseek/deepseek-v4-flash",
+        {"input": 1000, "output": 200, "reasoning": 50, "cache": {"read": 300, "write": 0}}),
+    msg("s2", now_ms, "assistant", "opencode-go", "deepseek-v4-flash",
+        {"input": 500, "output": 100, "cache": {"read": 0, "write": 40}}),
+    msg("s3", now_ms - 2 * day, "assistant", "opencode-go", "deepseek-v4",
+        {"input": 10, "output": 5, "cache": {"read": 1, "write": 0}}),
+    msg("s4", now_ms, "assistant", "openai", "gpt-x", {"input": 9999, "output": 9999}),
+    msg("s5", now_ms, "user", "opencode-go", "deepseek-v4-flash", {"input": 1}),
+    msg("s6", now_ms, "assistant", "opencode-go", "deepseek-v4-flash", None),
+    msg("s7", now_ms - 8 * day, "assistant", "opencode-go", "deepseek-v4",
+        {"input": 77, "output": 7, "cache": {"read": 3, "write": 0}}),
+    ("s8", "{not json"),
+]
+db.executemany("INSERT INTO message VALUES (?, ?)", rows)
+db.commit()
+db.close()
+PY
+}
+
+SCANNER="$HERE/../scripts/scan-opencode-stats.py"
+
+# Project the fields whose values do not depend on the run date.
+scansummary() {
+  python3 "$SCANNER" "$@" 2>/dev/null | jq -c '
+    {todayPrompts, todaySessions, todayTotalTokens, todayTokensByModel,
+     totalPrompts, totalSessions, activeDays, activeDates, modelUsage}'
+}
+
+mkdir -p "$ROOT/fx-scan/data/opencode" "$ROOT/fx-scan/cache"
+build_db "$ROOT/fx-scan/data/opencode/opencode.db"
+TODAY=$(date +%F)
+D2=$(date -d "-2 days" +%F)
+D8=$(date -d "-8 days" +%F)
+
+want=$(jq -nc --arg d8 "$D8" --arg d2 "$D2" --arg today "$TODAY" '
+  {todayPrompts: 2, todaySessions: 2, todayTotalTokens: 2190,
+   todayTokensByModel: {"deepseek-v4-flash": 2190},
+   totalPrompts: 4, totalSessions: 4, activeDays: 3,
+   activeDates: [$d8, $d2, $today],
+   modelUsage: {
+     "deepseek-v4-flash": {inputTokens: 1500, outputTokens: 350,
+                           cacheReadInputTokens: 300, cacheCreationInputTokens: 40},
+     "deepseek-v4": {inputTokens: 87, outputTokens: 12,
+                     cacheReadInputTokens: 4, cacheCreationInputTokens: 0}}}')
+got=$(XDG_DATA_HOME="$ROOT/fx-scan/data" XDG_CACHE_HOME="$ROOT/fx-scan/cache" \
+  scansummary opencode-go --force)
+if [[ $got == "$want" ]]; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: stats scan aggregations (got '$got')" >&2
+  fail=$((fail + 1))
+fi
+
+# The 7-day window: today and d-2 carry their message totals, older days zero.
+got=$(XDG_DATA_HOME="$ROOT/fx-scan/data" XDG_CACHE_HOME="$ROOT/fx-scan/cache" \
+  python3 "$SCANNER" opencode-go --force 2>/dev/null | \
+  jq -c --arg today "$TODAY" --arg d2 "$D2" \
+    '[.recentDays[] | select(.date == $today or .date == $d2) | {date, messageCount}]')
+if [[ $got == '[{"date":"'"$D2"'","messageCount":16},{"date":"'"$TODAY"'","messageCount":2190}]' ]]; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: stats scan 7-day window (got '$got')" >&2
+  fail=$((fail + 1))
+fi
+
+# A second run within the freshness window must be served from the scan cache.
+first=$(XDG_DATA_HOME="$ROOT/fx-scan/data" XDG_CACHE_HOME="$ROOT/fx-scan/cache" \
+  python3 "$SCANNER" opencode-go 2>/dev/null)
+second=$(XDG_DATA_HOME="$ROOT/fx-scan/data" XDG_CACHE_HOME="$ROOT/fx-scan/cache" \
+  python3 "$SCANNER" opencode-go 2>/dev/null)
+if [[ $first == "$second" && -s "$ROOT/fx-scan/cache/omarchy/opencode-go-stats.json" ]]; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: stats scan cache reuse" >&2
+  fail=$((fail + 1))
+fi
+
+# No database at all is a successful scan of nothing: exit 0, empty stats.
+mkdir -p "$ROOT/fx-nodb/data" "$ROOT/fx-nodb/cache"
+got=$(XDG_DATA_HOME="$ROOT/fx-nodb/data" XDG_CACHE_HOME="$ROOT/fx-nodb/cache" \
+  scansummary opencode-go --force) && [[ $got == '{"todayPrompts":0,"todaySessions":0,"todayTotalTokens":0,"todayTokensByModel":{},"totalPrompts":0,"totalSessions":0,"activeDays":0,"activeDates":[],"modelUsage":{}}' ]]
+if [[ $? == 0 ]]; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: stats scan with no database (got '$got')" >&2
+  fail=$((fail + 1))
+fi
+
+# ---- record integration: stats merge into the opencode-go record ------------
+# Source just the record builders (no fetch, no writes) and assert the record
+# carries the stats (hasLocalStats, device scope) or stays quota-only.
+record_stats() {
+  local stats=$1 want=$2 desc=$3 got
+  got=$(STATS="$stats" SCRIPT="$SCRIPT" bash -c '
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    source <(sed -n "/^record_envelope() {/,/^}/p;/^merge_fields() {/,/^}/p;/^build_record() {/,/^}/p;/^t() {/,/^}/p;/^declare -A _STR/,/^_STR\[en.tier\]/p" "$SCRIPT")
+    build_record "{\"usage\":{}}" en "$STATS" | \
+      jq -c "{has: .hasLocalStats, scope: .scope, days: (.recentDays|length), models: (.modelUsage|length), today: .todayTotalTokens}"
+  ')
+  if [[ $got == "$want" ]]; then
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc (got '$got')" >&2
+    fail=$((fail + 1))
+  fi
+}
+
+record_stats '{"modelUsage":{"deepseek-v4-flash":{"inputTokens":1}},"recentDays":[{"date":"x","messageCount":2}],"todayTotalTokens":9}' \
+  '{"has":true,"scope":"device","days":1,"models":1,"today":9}' "stats merged into record"
+record_stats '{}' \
+  '{"has":false,"scope":"account","days":0,"models":0,"today":0}' "empty stats stays quota-only"
+
 echo "passed=$pass failed=$fail"
 ((fail == 0))

@@ -13,6 +13,10 @@ The tabs show live quotas, one tab per provider with a resolvable credential:
 | OpenCode Go | `GET https://opencode.ai/zen/go/v1/usage` | rolling 5-hour, weekly, and monthly usage with meters, reset countdowns, and a red state past 90 % |
 | OpenRouter | `GET https://openrouter.ai/api/v1/key` | credit balance (remaining / funded / spent, USD) plus a monthly-spend meter when the key carries a cap; cap-less keys show the monthly spend as text instead of a percentage |
 
+The OpenCode Go tab also carries **local token usage** — tokens by day (last
+week) and tokens by model, with the input/output/cache split — aggregated
+from opencode's own database (see [Local token stats](#local-token-stats)).
+
 Without resolvable credentials the tab never appears; a failed fetch keeps the
 previous record visible until the next attempt succeeds.
 
@@ -86,6 +90,27 @@ Omarchy's Agents panel displays one JSON record per agent from
 Packaged collectors cover Claude/Codex/Fireworks; this plugin adds its own
 OpenCode Go collector, run on a timer inside omarchy-shell (the API response
 is cached a few minutes, so polling stays polite).
+
+## Local token stats
+
+Quotas are account-level, but the OpenCode Go tab also renders the same
+local usage sections the Codex and Claude tabs have: tokens by day for the
+last week, tokens by model with the input/output/cache split, and prompt and
+session counts. Those come from opencode's own database
+(`~/.local/share/opencode/opencode.db`), scanned read-only by
+`scripts/scan-opencode-stats.py` — the same approach omarchy's packaged codex
+collector uses: rows are gated in SQL before any JSON parsing, only assistant
+messages whose `providerID` matches the subscription count, and a partial scan
+still contributes what it read.
+
+The scan is cached for a few minutes (like the API response), so the
+minute-by-minute service timer never walks the database on every tick. A scan
+failure degrades the record to quotas only rather than going stale entirely.
+
+One nuance for the cross-machine merge: because the record now carries
+machine-local stats, it is written with `scope: "device"` so synced devices
+sum their usage instead of taking the widest value. Rate limits and balances
+stay per-account and are never merged, as before.
 
 ## Troubleshooting
 

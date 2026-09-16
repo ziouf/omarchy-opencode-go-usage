@@ -10,6 +10,11 @@
 # record in place, and the raw API response is cached a few minutes unless
 # --force is passed.
 #
+# The record carries the quota windows from the official usage API plus
+# local token usage (tokens by day and by model) aggregated from opencode's
+# own database by scan-opencode-stats.py — the same read-only scan the
+# stock codex collector runs, filtered to this subscription's provider.
+#
 # Endpoint: GET https://opencode.ai/zen/go/v1/usage (OpenCode Zen).
 #
 # Credential resolution, first hit wins:
@@ -26,6 +31,8 @@
 set -euo pipefail
 
 PROVIDER=opencode-go
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCAN_HELPER="$HERE/scan-opencode-stats.py"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy"
 MAX_AGE=240
@@ -259,10 +266,24 @@ write_record() {
   mv "$tmp" "$dest"
 }
 
+# ---------------------------------------------------------------- local stats
+
+# Token usage by day and by model comes from opencode's own database: every
+# assistant message records the provider, the model, and the token split.
+# The scan (read-only, cached a few minutes) prints the local-stats shape the
+# stock panel renders natively. A scan failure degrades to a quota-only
+# record rather than going stale entirely.
+scan_stats() {
+  local provider=${1:-$PROVIDER} force=${2:-} stats
+  # $force is intentionally unquoted: empty means no flag.
+  stats=$("$SCAN_HELPER" "$provider" $force 2>/dev/null) || return 1
+  printf '%s' "$stats"
+}
+
 # ------------------------------------------------------------------ record
 
 build_record() {
-  local payload=$1 loc=$2
+  local payload=$1 loc=$2 stats=$3
   record_envelope "$PROVIDER" "OpenCode Go" |
     merge_fields <(jq -n --argjson api "$payload" \
       --arg r_l "$(t "$loc" rolling_label)" --arg r_t "$(t "$loc" rolling_title)" \
@@ -300,7 +321,24 @@ build_record() {
           entry("weekly"; $w_l; $w_t),
           entry("monthly"; $m_l; $m_t)
         ]
-      }')
+      }') |
+    merge_fields <(jq -n --argjson st "$stats" '
+      def st($k): ($st[$k] // null);
+      {
+        hasLocalStats: (st("modelUsage") != null),
+        hasPromptStats: (st("modelUsage") != null),
+        todayPrompts: (st("todayPrompts") // 0),
+        todaySessions: (st("todaySessions") // 0),
+        todayTotalTokens: (st("todayTotalTokens") // 0),
+        todayTokensByModel: (st("todayTokensByModel") // {}),
+        recentDays: (st("recentDays") // []),
+        totalPrompts: (st("totalPrompts") // 0),
+        totalSessions: (st("totalSessions") // 0),
+        activeDays: (st("activeDays") // 0),
+        activeDates: (st("activeDates") // []),
+        modelUsage: (st("modelUsage") // {})
+      }
+      + (if (st("modelUsage") != null) then { scope: "device" } else {} end)')
 }
 
 record_envelope() {
@@ -418,11 +456,12 @@ update_openrouter() {
 }
 
 update_opencode_go() {
-  local key payload record
+  local key payload record stats
   key=$(resolve_key "$PROVIDER") || return 0
   payload=$(cached_json "https://opencode.ai/zen/go/v1/usage" \
     "$CACHE_DIR/opencode-go-usage.json" "$key") || return 0
-  record=$(build_record "$payload" "$LOC") || return 0
+  stats=$(scan_stats "$PROVIDER" "$force") || stats="{}"
+  record=$(build_record "$payload" "$LOC" "$stats") || return 0
   write_record "$record" "$STATE_DIR/opencode-go.json"
 }
 
