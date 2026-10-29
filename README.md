@@ -50,7 +50,8 @@ omarchy-shell ziouf.llm-quotas refresh
 
 ## Credential resolution
 
-The key is resolved on every refresh — first hit wins:
+The key is resolved on every refresh — first hit **the API accepts** wins (a
+key it rejects, e.g. an expired one, falls through to the next candidate):
 
 1. **Session environment variables**: `OPENCODE_GO_API_KEY` (aliases:
    `OPENCODE_ZEN_GO_API_KEY`, `ZEN_GO_API_KEY`) for OpenCode Go,
@@ -75,6 +76,10 @@ The key is resolved on every refresh — first hit wins:
    install -m 600 /dev/null ~/.config/omarchy/api-keys.env
    printf 'OPENCODE_GO_API_KEY=%s\n' "sk-..." >> ~/.config/omarchy/api-keys.env
    ```
+4. **The live session environment** (`systemctl --user show-environment`,
+   where `~/.config/uwsm/env.d/` lands). A GUI session keeps the environment it
+   was started with, so a key rotated after login is invisible to the tiers
+   above until the next login — this tier is what sees it.
 
 Agent configuration files are only ever read, never written. Their formats
 are private to each tool; adapters are covered by `tests/run.sh`.
@@ -102,6 +107,15 @@ is cached a few minutes, so polling stays polite).
   purpose; shell errors surface in `journalctl --user | grep -i
   opencode-go`. Force a fresh pull with `omarchy-shell
   ziouf.llm-quotas refresh`.
+- **A `401` in the journal on every fetch** — a credential in an early tier is
+  expired (the API says `api_key_expired`). The fetch walks the rest of the
+  list, so the tab keeps working, but rotate the dead key at its source.
+  `--resolve` prints the first candidate, not the one that was accepted, so
+  compare it against the environment the session actually holds:
+
+  ```bash
+  systemctl --user show-environment | grep OPENCODE_GO_API_KEY
+  ```
 
 ## Uninstall
 

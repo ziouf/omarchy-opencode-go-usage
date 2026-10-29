@@ -37,6 +37,14 @@ check() {
 
 mk() { mkdir -p "$ROOT/$1"; }
 
+# The live session environment is a real machine's state, so tests must not see
+# it: a stub systemctl answers "nothing", and the tier's own fixture below
+# swaps in a stub that does.
+mkdir -p "$ROOT/stub"
+printf '#!/bin/sh\nexit 0\n' >"$ROOT/stub/systemctl"
+chmod +x "$ROOT/stub/systemctl"
+export PATH="$ROOT/stub:$PATH"
+
 # ---- i18n: record strings follow the system locale -------------------------
 # Source just the translation unit (locale detection + string table) without
 # touching the network, then assert the rendered strings per locale.
@@ -192,6 +200,35 @@ rm -f "$ROOT/fx-file/.config/omarchy/defaults/agent"
 printf '# comment\nOPENCODE_GO_API_KEY=go-from-file\n' \
   >"$ROOT/fx-file/.config/omarchy/api-keys.env"
 check "api-keys.env fallback" "$ROOT/fx-file" go-from-file
+
+# ---- live session environment (systemd user manager) -----------------------
+# A key rotated after the session started is only reachable here; it must stay
+# behind every tier above it.
+mkdir -p "$ROOT/stub-live"
+printf '#!/bin/sh\nprintf "OPENCODE_GO_API_KEY=go-from-session-env\\n"\n' >"$ROOT/stub-live/systemctl"
+chmod +x "$ROOT/stub-live/systemctl"
+
+mk fx-session-env/.config/omarchy/defaults
+echo gemini >"$ROOT/fx-session-env/.config/omarchy/defaults/agent" # no adapter for gemini
+got=$(PATH="$ROOT/stub-live:$PATH" \
+  env -u OPENCODE_GO_API_KEY -u OPENCODE_ZEN_GO_API_KEY -u ZEN_GO_API_KEY \
+  HOME="$ROOT/fx-session-env" bash "$SCRIPT" --resolve 2>/dev/null)
+if [[ $got == go-from-session-env ]]; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: live session env tier (got '$got')" >&2
+  fail=$((fail + 1))
+fi
+
+got=$(PATH="$ROOT/stub-live:$PATH" \
+  env -u OPENCODE_GO_API_KEY -u OPENCODE_ZEN_GO_API_KEY -u ZEN_GO_API_KEY \
+  HOME="$ROOT/fx-opencode" bash "$SCRIPT" --resolve 2>/dev/null)
+if [[ $got == go-from-opencode ]]; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: an adapter hit must still outrank the live session env (got '$got')" >&2
+  fail=$((fail + 1))
+fi
 
 # ---- unknown agent, nothing anywhere ----------------------------------------
 mk fx-none/.config/omarchy/defaults

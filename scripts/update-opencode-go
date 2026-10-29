@@ -12,7 +12,9 @@
 #
 # Endpoint: GET https://opencode.ai/zen/go/v1/usage (OpenCode Zen).
 #
-# Credential resolution, first hit wins:
+# Credential resolution, first hit the API accepts wins (a key the API rejects
+# falls through to the next candidate — a stale copy in an early tier must not
+# black-hole the record):
 #
 #   1. Session environment variables (see env_var_names for the aliases)
 #   2. The system's default AI agent (omarchy-default-agent), searched in its
@@ -20,6 +22,8 @@
 #      depends on one harness being installed
 #   3. ~/.config/omarchy/api-keys.env manual override file (KEY=value lines,
 #      parsed literally, never sourced)
+#   4. The live session environment (systemd user manager), which is where a
+#      key rotated since the session started actually lives
 #
 # Agent config files are only ever read, never written.
 
@@ -104,7 +108,7 @@ key_from_env() {
   local name
   while IFS= read -r name; do
     if [[ -n ${!name:-} ]]; then
-      printf '%s' "${!name}"
+      printf '%s\n' "${!name}"
       return 0
     fi
   done < <(env_var_names "$1")
@@ -214,7 +218,7 @@ key_from_file() {
     [[ $line == *=* && $line != \#* ]] || continue
     while IFS= read -r name; do
       if [[ $line == "$name="* ]]; then
-        printf '%s' "${line#"$name="}"
+        printf '%s\n' "${line#"$name="}"
         return 0
       fi
     done < <(env_var_names "$1")
@@ -222,21 +226,47 @@ key_from_file() {
   return 1
 }
 
-resolve_key() {
-  local p=${1:-$PROVIDER} k
-  k=$(key_from_env "$p") && { printf '%s' "$k"; return 0; }
-  if [[ -n ${AGENT_CREDS[$p]:-} ]]; then
-    printf '%s' "${AGENT_CREDS[$p]}"
-    return 0
-  fi
-  k=$(key_from_file "$p") && { printf '%s' "$k"; return 0; }
+# The live session environment as the session manager holds it. A GUI session
+# keeps the environment it was started with, so a key rotated in uwsm's env.d
+# after login is invisible to every tier above — this is the only way to see it
+# without logging out.
+key_from_session_env() {
+  local p=${1:-$PROVIDER} name line env
+  command -v systemctl >/dev/null 2>&1 || return 1
+  env=$(systemctl --user show-environment 2>/dev/null) || return 1
+  while IFS= read -r name; do
+    line=$(printf '%s\n' "$env" | sed -n "s|^${name}=||p" | head -n1)
+    [[ -n $line ]] && { printf '%s\n' "$line"; return 0; }
+  done < <(env_var_names "$p")
   return 1
+}
+
+# Every credential that resolves for a provider, in priority order, one per
+# line, duplicates collapsed; the fetch walks the list until one is accepted.
+resolve_keys() {
+  local p=${1:-$PROVIDER}
+  {
+    key_from_env "$p" || true
+    [[ -z ${AGENT_CREDS[$p]:-} ]] || printf '%s\n' "${AGENT_CREDS[$p]}"
+    key_from_file "$p" || true
+    key_from_session_env "$p" || true
+  } | awk 'NF && !seen[$0]++'
+}
+
+# The candidate --resolve reports: the first hit, as it has always been.
+resolve_key() {
+  local k
+  k=$(resolve_keys "${1:-$PROVIDER}" | head -n1)
+  [[ -n $k ]] || return 1
+  printf '%s\n' "$k"
 }
 
 # ------------------------------------------------------------ fetch utilities
 
+# $3 is the whole candidate list (one key per line, see resolve_keys): an
+# expired key early in the list must not cost the record a valid later one.
 cached_json() {
-  local url=$1 cachefile=$2 key=$3
+  local url=$1 cachefile=$2 keys=$3
   if [[ -s $cachefile ]] && ! $force; then
     local age=$(( $(date +%s) - $(stat -c %Y "$cachefile" 2>/dev/null || echo 0) ))
     if (( age < MAX_AGE )); then
@@ -244,12 +274,17 @@ cached_json() {
       return 0
     fi
   fi
-  local payload
-  payload=$(printf 'Authorization: Bearer %s\nAccept: application/json\nUser-Agent: omarchy-llm-quotas/1.0\n' "$key" |
-    curl -fsS --max-time 15 -H @- "$url") || return 1
-  jq -e . >/dev/null 2>&1 <<<"$payload" || return 1
-  printf '%s' "$payload" >"$cachefile"
-  cat "$cachefile"
+  local key payload
+  while IFS= read -r key; do
+    [[ -n $key ]] || continue
+    payload=$(printf 'Authorization: Bearer %s\nAccept: application/json\nUser-Agent: omarchy-llm-quotas/1.0\n' "$key" |
+      curl -fsS --max-time 15 -H @- "$url") || continue
+    jq -e . >/dev/null 2>&1 <<<"$payload" || continue
+    printf '%s' "$payload" >"$cachefile"
+    cat "$cachefile"
+    return 0
+  done <<<"$keys"
+  return 1
 }
 
 write_record() {
@@ -409,19 +444,21 @@ build_openrouter_record() {
 }
 
 update_openrouter() {
-  local key payload record
-  key=$(resolve_key "openrouter") || return 0
+  local keys payload record
+  keys=$(resolve_keys "openrouter")
+  [[ -n $keys ]] || return 0
   payload=$(cached_json "https://openrouter.ai/api/v1/key" \
-    "$CACHE_DIR/openrouter-key.json" "$key") || return 0
+    "$CACHE_DIR/openrouter-key.json" "$keys") || return 0
   record=$(build_openrouter_record "$payload" "$LOC") || return 0
   write_record "$record" "$STATE_DIR/openrouter.json"
 }
 
 update_opencode_go() {
-  local key payload record
-  key=$(resolve_key "$PROVIDER") || return 0
+  local keys payload record
+  keys=$(resolve_keys "$PROVIDER")
+  [[ -n $keys ]] || return 0
   payload=$(cached_json "https://opencode.ai/zen/go/v1/usage" \
-    "$CACHE_DIR/opencode-go-usage.json" "$key") || return 0
+    "$CACHE_DIR/opencode-go-usage.json" "$keys") || return 0
   record=$(build_record "$payload" "$LOC") || return 0
   write_record "$record" "$STATE_DIR/opencode-go.json"
 }
